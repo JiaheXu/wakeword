@@ -88,8 +88,8 @@ def detection_loop(q: queue.Queue, detector: WakeWordDetector):
 # =========================
 def main():
     q = queue.Queue()
-    # detector = WakeWordDetector("alexa_v0.1")
-    detector = WakeWordDetector("./zh/xiao_ai.tflite")
+    detector = WakeWordDetector("alexa_v0.1")
+    # detector = WakeWordDetector("./zh/xiao_ai.tflite")
     # Detect nearest supported sample rate
     try:
         input_sr = TARGET_SR

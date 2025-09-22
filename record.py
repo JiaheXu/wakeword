@@ -5,7 +5,7 @@ import soundfile as sf
 SAMPLE_RATE = 48000   # match your mic (44.1 kHz)
 CHANNELS = 1          # mono
 DURATION = 10          # seconds
-OUTPUT_FILE = "recorded.wav"
+OUTPUT_FILE = "test_input_48k.wav"
 
 print(f"🎙️ Recording {DURATION} seconds at {SAMPLE_RATE} Hz ...")
 
