@@ -2,15 +2,13 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from pino_msgs.srv import Text   # custom service
 
 import sounddevice as sd
 import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly
-from openwakeword.model import Model
 import threading, queue, os, time
-from collections import deque
-import argparse
 
 # VAD
 from utils.vad import load_vad
@@ -23,26 +21,23 @@ from faster_whisper import WhisperModel
 TARGET_SR = 16000
 FRAME_LENGTH = int(1.5 * TARGET_SR)
 STEP_SIZE = int(0.1 * TARGET_SR)
-WAKEWORD_THRESHOLD = 0.5
 VAD_THRESHOLD = 2.0
 VAD_START_LENGTH = int(1.5 * TARGET_SR)
-ROLLBACK_SEC = 2
 SAVE_DIR = "detections"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 
-class WakeWordVADDetector:
-    def __init__(self, wakeword_model, vad_model, whisper_model, publisher):
-        self.model = wakeword_model
+class VADDetector:
+    def __init__(self, vad_model, whisper_model, publisher, response_pub, client, node):
         self.vad_model = vad_model
         self.whisper_model = whisper_model
         self.publisher = publisher
+        self.response_pub = response_pub
+        self.client = client
+        self.node = node
 
-        self.mode = "wakeword"
         self.audio_buffer = []
-        self.wakeword_buffer = deque(maxlen=ROLLBACK_SEC * TARGET_SR)
         self.detection_count = 0
-        self.start_time = None
 
     def save_segment(self):
         if len(self.audio_buffer) == 0:
@@ -73,46 +68,49 @@ class WakeWordVADDetector:
             transcript_text += seg.text.strip()
 
         if transcript_text:
+            # Publish transcript
             msg = String()
             msg.data = transcript_text
             self.publisher.publish(msg)
             print(f"📢 Published transcript: {transcript_text}")
 
-    def process_wakeword(self):
-        while len(self.audio_buffer) >= FRAME_LENGTH:
-            frame = np.array(self.audio_buffer[:FRAME_LENGTH], dtype=np.float32)
-            preds = self.model.predict(frame)
-            for ww, score in preds.items():
-                if score > WAKEWORD_THRESHOLD:
-                    self.detection_count += 1
-                    print(f"🚀 Wakeword '{ww}' detected! Switching to VAD mode")
-                    self.audio_buffer = self.audio_buffer[FRAME_LENGTH:]
-                    self.mode = "vad"
-                    self.start_time = time.time()
-                    return
-            self.audio_buffer = self.audio_buffer[STEP_SIZE:]
+            # Call llm_service
+            req = Text.Request()
+            req.text = transcript_text
+            future = self.client.call_async(req)
+
+            def _callback(fut):
+                try:
+                    resp = fut.result()
+                    if resp.success:
+                        print(f"✅ LLM Response: {resp.response}")
+                        out = String()
+                        out.data = resp.response
+                        self.response_pub.publish(out)
+                        print(f"📢 Published LLM response: {resp.response}")
+                    else:
+                        print(f"⚠️ LLM Service returned failure: {resp.response}")
+                except Exception as e:
+                    print(f"❌ Service call exception: {e}")
+
+            future.add_done_callback(_callback)
 
     def handle_audio(self, samples):
         self.audio_buffer.extend(samples)
 
-        if self.mode == "wakeword":
-            self.process_wakeword()
+        samples_norm = (samples / 32767).astype(np.float32)
 
-        elif self.mode == "vad":
-            samples_norm = (samples / 32767).astype(np.float32)
+        if len(self.audio_buffer) < VAD_START_LENGTH:
+            return
 
-            if len(self.audio_buffer) < VAD_START_LENGTH:
-                return
+        voice_prob = float(self.vad_model(samples_norm, sr=TARGET_SR).flatten()[0])
+        print(f"VAD prob: {voice_prob:.3f}")
 
-            voice_prob = float(self.vad_model(samples_norm, sr=TARGET_SR).flatten()[0])
-            print(f"VAD prob: {voice_prob:.3f}")
-
-            if voice_prob < VAD_THRESHOLD:
-                utterance = self.save_segment()
-                if utterance is not None:
-                    self.transcribe(utterance)
-                self.mode = "wakeword"
-                self.audio_buffer = []
+        if voice_prob < VAD_THRESHOLD:
+            utterance = self.save_segment()
+            if utterance is not None:
+                self.transcribe(utterance)
+            self.audio_buffer = []
 
 
 def audio_callback(indata, frames, time_info, status, q: queue.Queue, input_sr):
@@ -122,7 +120,7 @@ def audio_callback(indata, frames, time_info, status, q: queue.Queue, input_sr):
     q.put(audio)
 
 
-def detection_loop(q: queue.Queue, detector: WakeWordVADDetector, input_sr):
+def detection_loop(q: queue.Queue, detector: VADDetector, input_sr):
     buffer = np.array([], dtype=np.int16)
     target_len = int(0.1 * input_sr)
 
@@ -145,31 +143,55 @@ def detection_loop(q: queue.Queue, detector: WakeWordVADDetector, input_sr):
             detector.handle_audio(chunk)
 
 
+def find_device(name_substring=None):
+    devices = sd.query_devices()
+    if name_substring:
+        for idx, dev in enumerate(devices):
+            if name_substring.lower() in dev['name'].lower() and dev['max_input_channels'] > 0:
+                print(f"✅ Using matched input device {idx}: {dev['name']}")
+                return idx
+    default_input = sd.default.device[0]
+    if default_input is not None and default_input >= 0:
+        print(f"✅ Using default input device {default_input}: {devices[default_input]['name']}")
+        return default_input
+    raise RuntimeError("❌ No valid input device found.")
+
+
 class SpeechNode(Node):
     def __init__(self):
         super().__init__("speech_node")
-        self.publisher_ = self.create_publisher(String, "user_speech", 10)
 
         # Load models
         vad_model = load_vad("/home/developer/model_data/silero_vad.onnx")
         vad_model(np.zeros(1536, dtype=np.float32), sr=TARGET_SR)
-        whisper_model = WhisperModel("base")
-        openwakeword_model = Model(wakeword_models=["alexa_v0.1"])
-        test_frame = np.zeros(FRAME_LENGTH, dtype=np.float32)
-        openwakeword_model.predict(test_frame)
+        whisper_model = WhisperModel("large-v3", device='cuda')
+        
+        print("loaded VAD and ASR")
+        
+        # Publishers
+        self.publisher_ = self.create_publisher(String, "user_speech", 10)
+        self.response_pub = self.create_publisher(String, "llm_response", 10)
 
-        self.detector = WakeWordVADDetector(
-            wakeword_model=openwakeword_model,
+        # LLM client
+        self.cli = self.create_client(Text, "llm_service")
+        while not self.cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info("⏳ Waiting for llm_service...")
+        print("found service !!!")
+
+        self.detector = VADDetector(
             vad_model=vad_model,
             whisper_model=whisper_model,
             publisher=self.publisher_,
+            response_pub=self.response_pub,
+            client=self.cli,
+            node=self,
         )
 
-        # Start audio
+        # Audio stream
         self.q = queue.Queue()
         input_sr = 48000
         blocksize = int(0.02 * input_sr)
-        device_index = sd.default.device[0]  # pick default input
+        device_index = find_device("USB PnP Sound Device")
 
         self.consumer_thread = threading.Thread(
             target=detection_loop, args=(self.q, self.detector, input_sr), daemon=True

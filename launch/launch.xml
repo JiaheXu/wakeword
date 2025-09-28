@@ -1,0 +1,4 @@
+<launch>
+    <node pkg="asr" exec="asr" name="asr_node" output="screen">
+</launch>
+

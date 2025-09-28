@@ -90,11 +90,11 @@ def detection_loop(q: queue.Queue, detector: WakeWordDetector, input_sr):
 # =========================
 def main():
     q = queue.Queue()
-    detector = WakeWordDetector("alexa_v0.1")
-    # detector = WakeWordDetector("./zh/xiao_ai.tflite")
+    # detector = WakeWordDetector("alexa_v0.1")
+    detector = WakeWordDetector("./xiaobai2/xiaobai.tflite")
 
     input_sr = 48000
-    blocksize = int(0.05 * input_sr)  # 50ms block at input SR
+    blocksize = int(0.02 * input_sr)  # 50ms block at input SR
 
     # Start consumer thread
     consumer_thread = threading.Thread(

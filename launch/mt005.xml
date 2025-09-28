@@ -1,0 +1,13 @@
+<launch>
+
+  <group>
+    <push-ros-namespace namespace="mt005"/>
+    <node pkg="autonomy_executive" exec="local_joystick_command" name="joystick_cmd_node" output="screen">
+    </node>
+  </group>
+  <!-- <node pkg="autonomy_executive" exec="local_joystick_command" name="joystick_cmd_node" output="screen">
+  </node> -->
+  <!-- <node pkg="demo_nodes_cpp" exec="talker" name="talker"/> -->
+
+</launch>
+

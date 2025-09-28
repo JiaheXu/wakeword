@@ -1,2 +1,1 @@
-# wakeword
-playground of common wakeword modules
+# autonomy_executive

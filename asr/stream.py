@@ -256,7 +256,7 @@ def find_device(name_substring=None):
 # =========================
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device", type=str, default="USB PnP Sound Device",
+    parser.add_argument("--device", type=str, default="USB",
                         help="Name substring of the input device (default: USB PnP Sound Device)")
     parser.add_argument("--list-devices", action="store_true",
                         help="List available audio devices and exit")
