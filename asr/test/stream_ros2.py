@@ -21,9 +21,9 @@ from faster_whisper import WhisperModel
 # Configuration
 # =========================
 TARGET_SR = 16000
-FRAME_LENGTH = int(1.0 * TARGET_SR)
-STEP_SIZE = int(0.2 * TARGET_SR)
-WAKEWORD_THRESHOLD = 0.05
+FRAME_LENGTH = int(2.0 * TARGET_SR)
+STEP_SIZE = int(0.15 * TARGET_SR)
+WAKEWORD_THRESHOLD = 0.06
 VAD_THRESHOLD = 0.5
 VAD_START_LENGTH = int(1.5 * TARGET_SR)
 SILENT_LENGTH = 1.0
@@ -42,7 +42,7 @@ class WakeWordVADDetector:
         self.client = client             # service client to llm_service
         self.node = node
 
-        self.noise_keywords = [ '字幕', '订阅' ,'谢谢大家']
+        self.noise_keywords = [ '字幕', '订阅' ,'谢谢大家' , 'CANADA']
 
         self.cc = OpenCC('t2s')
         self.mode = "wakeword"
@@ -55,6 +55,7 @@ class WakeWordVADDetector:
         self.last_none_word = time.time()
         self.last_detect = time.time()
         self.last_speech_end = time.time()
+        self.last_cmd_time = time.time() - 10.0
 
     def save_segment(self, save = False):
         if len(self.audio_buffer) == 0:
@@ -104,6 +105,9 @@ class WakeWordVADDetector:
         if( any(k in transcript_text for k in self.noise_keywords) ):
             return
 
+        if( time.time() - self.last_cmd_time < 5.0):
+            return
+
         if transcript_text:
             # --- Publish transcript to topic ---
             msg = String()
@@ -114,6 +118,7 @@ class WakeWordVADDetector:
             # --- Call llm_service with transcript ---
             req = Text.Request()
             req.text = transcript_text
+            self.last_cmd_time = time.time()
             future = self.client.call_async(req)
 
             def _callback(fut):
@@ -257,7 +262,10 @@ class SpeechNode(Node):
         vad_model = load_vad("/home/developer/model_data/silero_vad.onnx")
         vad_model(np.zeros(1536, dtype=np.float32), sr=TARGET_SR)
         whisper_model = WhisperModel("/home/developer/model_data/faster-whisper-large-v3", device='cuda')
-        openwakeword_model = Model(wakeword_models=["alexa_v0.1"])
+
+        #openwakeword_model = Model(wakeword_models=["alexa_v0.1"])
+        openwakeword_model = Model(wakeword_models=["./zh/xiaobai.tflite"])
+        
         test_frame = np.zeros(FRAME_LENGTH, dtype=np.float32)
         openwakeword_model.predict(test_frame)
         

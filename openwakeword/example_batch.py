@@ -3,12 +3,12 @@ import numpy as np
 from openwakeword.model import Model
 
 # Folders
-SUCCESS_DIR = "./success"
-FAIL_DIR = "./fail"
+SUCCESS_DIR = "./train/success"
+FAIL_DIR = "./train/fail"
 
 # Initialize the model
 model = Model(
-    wakeword_models=["./xiaobai2/xiaobai.tflite"]
+    wakeword_models=["./xiaobai11/xiaobai.tflite"]
 )
 #    wakeword_models=["./xiaobai2/xiaobai.tflite"]
 #    wakeword_models=["./xiaobai4/xiaobai.tflite"]

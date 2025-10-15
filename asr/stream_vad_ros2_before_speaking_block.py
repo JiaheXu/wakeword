@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Bool
+from std_msgs.msg import String
 # from pino_msgs.srv import Text   # custom service
 
 import sounddevice as sd
@@ -18,7 +18,7 @@ from utils.vad import load_vad
 from faster_whisper import WhisperModel
 from pathlib import Path
 
-home_dir = str(Path.home())
+home_dir = str( Path.home() )
 
 # =========================
 # Configuration
@@ -37,7 +37,6 @@ ROLLBACK_SEC = 2
 SAVE_DIR = "detections"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-
 class WakeWordVADDetector:
     def __init__(self, wakeword_model, vad_model, whisper_model, publisher, response_pub, client, node):
         self.model = wakeword_model
@@ -48,7 +47,8 @@ class WakeWordVADDetector:
         self.client = client             # service client to llm_service
         self.node = node
 
-        #self.publisher_ = self.node.create_publisher(String, "raw_input", 10)
+        # self.noise_keywords = [ '字幕', '订阅' ,'谢谢大家' , 'CANADA']
+        self.publisher_ = self.create_publisher(String, "raw_input", 10)
         self.cc = OpenCC('t2s')
         self.mode = "vad"
         self.audio_buffer = []
@@ -62,20 +62,22 @@ class WakeWordVADDetector:
         self.last_speech_end = time.time()
         self.last_cmd_time = time.time() - 10.0
 
-    def save_segment(self, save=False):
+    def save_segment(self, save = False):
         if len(self.audio_buffer) == 0:
             return None
         samples = np.array(self.audio_buffer, dtype=np.int16)
 
-        if save:
-            filename = os.path.join(SAVE_DIR, f"speech_{self.detection_count}.wav")
+        if(save):
+            filename = os.path.join(SAVE_DIR, f"speech_{self.detection_count}.wav")    
             sf.write(filename, samples, TARGET_SR, subtype="PCM_16")
             print(f"💾 Saved utterance: {filename}")
         self.audio_buffer = []
         return samples
 
     def traditional_to_simplified(self, text: str) -> str:
-        """繁体 → 简体"""
+        """
+        将输入的繁体中文字符串转换为简体中文
+        """
         return self.cc.convert(text)
 
     def transcribe(self, samples: np.ndarray):
@@ -97,13 +99,20 @@ class WakeWordVADDetector:
         if transcript_text:
             msg = String()
             msg.data = transcript_text
+            # 现在发布到 raw_input
             self.publisher.publish(msg)
             print(f"📢 Published transcript to raw_input: {transcript_text}")
 
     def process_wakeword(self):
         while len(self.audio_buffer) >= FRAME_LENGTH:
             frame = np.array(self.audio_buffer[:FRAME_LENGTH], dtype=np.float32)
+            
+            start = time.time()
             preds = self.model.predict(frame)
+            # preds = self.model.predict(frame)
+            end = time.time()
+            took = end - start
+            print('wakeword took: ', f'{ took:.3f}' )
 
             for ww, score in preds.items():
                 print(f"{ww} score: {score:.3f}")
@@ -118,17 +127,26 @@ class WakeWordVADDetector:
             self.audio_buffer = self.audio_buffer[STEP_SIZE:]
 
     def handle_audio(self, samples):
+
         samples_norm = (samples / 32767).astype(np.float32)
 
+        start = time.time()
         voice_prob = float(self.vad_model(samples_norm, sr=TARGET_SR).flatten()[0])
+        end = time.time()
+        print("VAD took: ", end - start)
         print(f"VAD prob: {voice_prob:.3f}")
 
         if voice_prob < VAD_THRESHOLD:
             self.last_none_word = time.time()
-            if self.last_none_word - self.last_word > SILENT_LENGTH:
+
+            if(self.last_none_word - self.last_word > SILENT_LENGTH):
+                # start = time.time()
                 utterance = self.save_segment()
+                # end = time.time()
+                # print("save audio took: ", end - start)
                 if utterance is not None:
                     self.transcribe(utterance)
+                # self.mode = "wakeword"
                 self.audio_buffer = []
         else:
             self.audio_buffer.extend(samples)
@@ -136,6 +154,7 @@ class WakeWordVADDetector:
 
 
 def audio_callback(indata, frames, time_info, status, q: queue.Queue, input_sr):
+    # print("audio_callback")
     if status:
         print(status)
     audio = np.squeeze(indata).astype(np.float32)
@@ -144,7 +163,7 @@ def audio_callback(indata, frames, time_info, status, q: queue.Queue, input_sr):
 
 def detection_loop(q: queue.Queue, detector: WakeWordVADDetector, input_sr):
     buffer = np.array([], dtype=np.int16)
-    target_len = int(VAD_LENGTH * input_sr)
+    target_len = int( VAD_LENGTH * input_sr)
 
     while rclpy.ok():
         if q.empty():
@@ -163,8 +182,6 @@ def detection_loop(q: queue.Queue, detector: WakeWordVADDetector, input_sr):
             if input_sr != TARGET_SR:
                 chunk = resample_poly(chunk, TARGET_SR, input_sr).astype(np.float32)
             detector.handle_audio(chunk)
-
-
 # =========================
 # Device Selection
 # =========================
@@ -175,14 +192,17 @@ def list_devices():
         print(f"[{idx}] {dev['name']} (inputs={dev['max_input_channels']}, outputs={dev['max_output_channels']})")
 
 def find_device(name_substring=None):
+    """Search for a device by substring, or fall back to default input device."""
     devices = sd.query_devices()
+
     if name_substring:
         for idx, dev in enumerate(devices):
             if name_substring.lower() in dev['name'].lower() and dev['max_input_channels'] > 0:
                 print(f"✅ Using matched input device {idx}: {dev['name']}")
                 return idx
-        print(f"⚠️ Device with name containing '{name_substring}' not found, fallback to default")
+        print(f"⚠️ Device with name containing '{name_substring}' not found, falling back to default input.")
 
+    # fallback: system default input
     default_input = sd.default.device[0]  # (input, output)
     if default_input is not None and default_input >= 0:
         print(f"✅ Using default input device {default_input}: {devices[default_input]['name']}")
@@ -190,87 +210,73 @@ def find_device(name_substring=None):
 
     raise RuntimeError("❌ No valid input device found.")
 
-
 class SpeechNode(Node):
     def __init__(self):
         super().__init__("speech_node")
 
-        # Track speaker state
-        self.speaker_playing = False
-        self.create_subscription(Bool, "speaker_playing", self.speaker_cb, 10)
+
 
         # Load models
-        vad_model = load_vad(home_dir + "/model_data/silero_vad.onnx")
+        vad_model = load_vad(  home_dir + "/model_data/silero_vad.onnx")
         vad_model(np.zeros(1536, dtype=np.float32), sr=TARGET_SR)
         whisper_model = WhisperModel(home_dir + "/model_data/faster-whisper-large-v3", device='cuda')
-        # openwakeword_model = Model(wakeword_models=["./zh/xiaobai.tflite"])
-        # openwakeword_model.predict(np.zeros(FRAME_LENGTH, dtype=np.float32))
-        print("✅ Finished model loading")
 
-        # Publishers
+        #openwakeword_model = Model(wakeword_models=["alexa_v0.1"])
+        openwakeword_model = Model(wakeword_models=["./zh/xiaobai.tflite"])
+        
+        test_frame = np.zeros(FRAME_LENGTH, dtype=np.float32)
+        openwakeword_model.predict(test_frame)
+        
+        print('finished model loading!!!!')
+
+        # Publisher for raw transcripts
         self.publisher_ = self.create_publisher(String, "user_speech", 10)
+
+        # Publisher for LLM responses
         self.response_pub = self.create_publisher(String, "llm_response", 10)
 
-        # Service client
-        # self.cli = self.create_client(String, "llm_service")  # keep placeholder
-        # while not self.cli.wait_for_service(timeout_sec=1.0):
-        #    self.get_logger().info("⏳ Waiting for llm_service...")
-        print("✅ Found LLM service")
+        # Service client to LLM service
+        self.cli = self.create_client(Text, "llm_service")
+        while not self.cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info("⏳ Waiting for llm_service...")
+        
+        print("found service")
 
         self.detector = WakeWordVADDetector(
-            wakeword_model=None,
+            wakeword_model=openwakeword_model,
             vad_model=vad_model,
             whisper_model=whisper_model,
-            publisher=self.publisher_,
-            response_pub=self.response_pub,
-            client=None,
+            publisher=self.publisher_,      # topic: user_speech
+            response_pub=self.response_pub, # topic: llm_response
+            client=self.cli,                # service client
             node=self,
         )
+        print("finished ros init part")
+        # Start audio stream
 
-        # Audio queue + stream
+
         self.q = queue.Queue()
         input_sr = 48000
         blocksize = int(0.02 * input_sr)
-        device_index = find_device("USB")
+        device_index = find_device('USB') #("USB PnP Sound Device")
+        # device_index = sd.default.device[0]  # pick default input
 
         self.consumer_thread = threading.Thread(
             target=detection_loop, args=(self.q, self.detector, input_sr), daemon=True
         )
         self.consumer_thread.start()
-
+        # print("start init stream")
         self.stream = sd.InputStream(
             samplerate=input_sr,
             blocksize=blocksize,
             dtype="int16",
             channels=1,
             device=device_index,
-            callback=lambda indata, frames, time_info, status: self.audio_cb(
+            callback=lambda indata, frames, time_info, status: audio_callback(
                 indata, frames, time_info, status, self.q, input_sr
             ),
         )
         self.stream.start()
-
-    def speaker_cb(self, msg: Bool):
-        """Callback for /speaker_playing Bool topic."""
-        self.speaker_playing = msg.data
-        if msg.data:
-            # Flush buffers
-            with self.q.mutex:
-                dropped = len(self.q.queue)
-                self.q.queue.clear()
-            self.detector.audio_buffer = []
-            self.get_logger().info(f"🔇 Speaker playing → mic input disabled, flushed {dropped} chunks")
-        # else:
-        #     self.get_logger().info("🎤 Speaker stopped → mic input re-enabled")
-
-    def audio_cb(self, indata, frames, time_info, status, q: queue.Queue, input_sr):
-        """Audio callback that respects speaker_playing state."""
-        if self.speaker_playing:
-            return  # ignore while speaker is active
-        if status:
-            print(status)
-        audio = np.squeeze(indata).astype(np.float32)
-        q.put(audio)
 
 
 def main(args=None):
