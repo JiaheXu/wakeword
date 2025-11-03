@@ -32,7 +32,7 @@ VAD_START_LENGTH = int(1.5 * TARGET_SR)
 
 VAD_LENGTH = 0.2
 
-SILENT_LENGTH = 1.0
+SILENT_LENGTH = 0.5
 ROLLBACK_SEC = 2
 SAVE_DIR = "detections"
 os.makedirs(SAVE_DIR, exist_ok=True)
