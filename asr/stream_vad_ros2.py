@@ -86,13 +86,21 @@ class WakeWordVADDetector:
         if samples.dtype == np.int16:
             samples = samples.astype(np.float32) / 32768.0
 
-        segments, info = self.whisper_model.transcribe(
-            samples.astype(np.float16), language="zh"
-        )
+        segments, info = self.whisper_model.transcribe(samples.astype(np.float16))
+        detected_lang = getattr(info, "language", None)
+        if detected_lang:
+            lang_prob = getattr(info, "language_probability", None)
+            if lang_prob is None:
+                print(f"🌐 Detected language: {detected_lang}")
+            else:
+                print(f"🌐 Detected language: {detected_lang} (p={lang_prob:.2f})")
 
         transcript_text = ""
         for seg in segments:
-            transcript_text += self.traditional_to_simplified(seg.text.strip())
+            text = seg.text.strip()
+            if detected_lang and detected_lang.startswith("zh"):
+                text = self.traditional_to_simplified(text)
+            transcript_text += text
 
         if transcript_text:
             msg = String()
@@ -287,4 +295,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-
