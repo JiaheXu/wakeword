@@ -1,0 +1,5 @@
+onnx                                     1.16.0
+onnx-graphsurgeon                        0.5.2
+onnxruntime                              1.23.2
+onnxruntime-gpu                          1.17.0
+

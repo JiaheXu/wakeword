@@ -13,15 +13,17 @@ sudo make install
 pip install pybind11
 
 cd ~/CTranslate2/python
-pip install .
+pip install . --no-build-isolation
 
 pip3 install openwakeword==0.5.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+python3 -m pip install --user --upgrade pip setuptools==67.2.0 wheel -i https://pypi.tuna.tsinghua.edu.cn/simple
+
 
 
 sudo apt install portaudio19-dev alsa-utils
 
-sudo apt update
-sudo apt install -y ffmpeg libavdevice-dev libavfilter-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+sudo apt install -y ffmpeg libavdevice-dev libavfilter-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev portaudio19-dev alsa-utils
 
 pip install av -i https://pypi.tuna.tsinghua.edu.cn/simple
 

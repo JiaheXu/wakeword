@@ -8,8 +8,8 @@ import sounddevice as sd
 import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly
-# from openwakeword.model import Model
-import threading, queue, os, time, sys
+from openwakeword.model import Model
+import threading, queue, os, time
 from collections import deque
 from opencc import OpenCC
 # VAD
@@ -27,31 +27,15 @@ TARGET_SR = 16000
 FRAME_LENGTH = int(2.0 * TARGET_SR)
 STEP_SIZE = int(0.15 * TARGET_SR)
 WAKEWORD_THRESHOLD = 0.06
-VAD_THRESHOLD = 0.5
+VAD_THRESHOLD = 0.6
 VAD_START_LENGTH = int(1.5 * TARGET_SR)
 
 VAD_LENGTH = 0.2
 
-SILENT_LENGTH = 1.0
+SILENT_LENGTH = 0.5
 ROLLBACK_SEC = 2
-MAX_AUDIO_SEC = 8
 SAVE_DIR = "detections"
 os.makedirs(SAVE_DIR, exist_ok=True)
-
-
-def _handle_fatal_exception(exc_type, exc, tb):
-    if issubclass(exc_type, MemoryError):
-        print("❌ MemoryError detected, exiting process.")
-        os._exit(1)
-    sys.__excepthook__(exc_type, exc, tb)
-
-
-def _threading_excepthook(args):
-    _handle_fatal_exception(args.exc_type, args.exc_value, args.exc_traceback)
-
-
-sys.excepthook = _handle_fatal_exception
-threading.excepthook = _threading_excepthook
 
 
 class WakeWordVADDetector:
@@ -77,7 +61,9 @@ class WakeWordVADDetector:
         self.last_detect = time.time()
         self.last_speech_end = time.time()
         self.last_cmd_time = time.time() - 10.0
-        self.last_vad_log_time = 0.0
+
+        # Language setting: False=Chinese ("zh"), True=English ("en")
+        self.is_english = False
 
     def save_segment(self, save=False):
         if len(self.audio_buffer) == 0:
@@ -100,38 +86,42 @@ class WakeWordVADDetector:
             print("⚠️ Whisper model not loaded, skipping transcription")
             return
 
-        transcribe_start = time.time()
-
         if samples.dtype == np.int16:
             samples = samples.astype(np.float32) / 32768.0
 
-        current_lang = "zh"
+        # segments, info = self.whisper_model.transcribe(samples.astype(np.float16))
+        # detected_lang = getattr(info, "language", None)
+        # if detected_lang:
+        #     lang_prob = getattr(info, "language_probability", None)
+        #     if lang_prob is None:
+        #         print(f"🌐 Detected language: {detected_lang}")
+        #     else:
+        #         print(f"🌐 Detected language: {detected_lang} (p={lang_prob:.2f})")
+
+        # Use current language setting
+        current_lang = "en" if self.is_english else "zh"
         print(f"🌐 Transcribing with language: {current_lang}")
-        try:
-            segments, info = self.whisper_model.transcribe(
-                samples.astype(np.float32),
-                language=current_lang,
-                task="transcribe",
-                beam_size=3,
-            )
-            detected_lang = current_lang
 
-            transcript_text = ""
-            for seg in segments:
-                text = seg.text.strip()
-                if detected_lang.startswith("zh"):
-                    text = self.traditional_to_simplified(text)
-                transcript_text += text
+        segments, info = self.whisper_model.transcribe(
+            samples.astype(np.float32),
+            language=current_lang,
+            task="transcribe",
+            beam_size=3,
+        )
 
-            if transcript_text:
-                msg = String()
-                msg.data = transcript_text
-                self.publisher.publish(msg)
-                print(f"📢 Published transcript to raw_input: {transcript_text}")
-        finally:
-            elapsed = time.time() - transcribe_start
-            audio_sec = len(samples) / TARGET_SR
-            print(f"⏱️ Transcribe time cost: {elapsed:.3f}s (audio={audio_sec:.2f}s)")
+        transcript_text = ""
+        for seg in segments:
+            text = seg.text.strip()
+            # Convert traditional to simplified Chinese if using Chinese
+            if not self.is_english:
+                text = self.traditional_to_simplified(text)
+            transcript_text += text
+
+        if transcript_text:
+            msg = String()
+            msg.data = transcript_text
+            self.publisher.publish(msg)
+            print(f"📢 Published transcript to raw_input: {transcript_text}")
 
     def process_wakeword(self):
         while len(self.audio_buffer) >= FRAME_LENGTH:
@@ -154,10 +144,8 @@ class WakeWordVADDetector:
         samples_norm = (samples / 32767).astype(np.float32)
 
         voice_prob = float(self.vad_model(samples_norm, sr=TARGET_SR).flatten()[0])
-        now = time.time()
-        if voice_prob >= 0.5 and (now - self.last_vad_log_time) >= 5.0:
-            print(f"VAD prob: {voice_prob:.3f}")
-            self.last_vad_log_time = now
+        print(f"VAD prob: {voice_prob:.3f}")
+
         if voice_prob < VAD_THRESHOLD:
             self.last_none_word = time.time()
             if self.last_none_word - self.last_word > SILENT_LENGTH:
@@ -168,11 +156,6 @@ class WakeWordVADDetector:
         else:
             self.audio_buffer.extend(samples)
             self.last_word = time.time()
-            if len(self.audio_buffer) >= int(MAX_AUDIO_SEC * TARGET_SR):
-                utterance = self.save_segment()
-                if utterance is not None:
-                    self.transcribe(utterance)
-                self.audio_buffer = []
 
 
 def audio_callback(indata, frames, time_info, status, q: queue.Queue, input_sr):
@@ -239,33 +222,46 @@ class SpeechNode(Node):
         self.speaker_playing = False
         self.create_subscription(Bool, "speaker_playing", self.speaker_cb, 10)
 
+        # Language setting: False=Chinese, True=English
+        self.is_english = False
+        self.create_subscription(Bool, "language_cmd", self.language_cmd_cb, 10)
+
         # Load models
         vad_model = load_vad(home_dir + "/model_data/silero_vad.onnx")
         vad_model(np.zeros(1536, dtype=np.float32), sr=TARGET_SR)
-        whisper_model = WhisperModel(home_dir + "/model_data/faster-whisper-large-v3", device='cuda')
-        # whisper_model = WhisperModel(home_dir + "/model_data/faster-distil-whisper-large-v3", device='cuda')
-        # whisper_model = WhisperModel(home_dir + "/model_data/faster-whisper-base", device='cuda')        
-        # Warm-up whisper model to reduce first-utterance latency
-        try:
-            warmup_audio = np.zeros(TARGET_SR, dtype=np.float32)  # 1s of silence @16k
-            list(
-                whisper_model.transcribe(
-                    warmup_audio,
-                    language="zh",
-                    task="transcribe",
-                    beam_size=1,
-                )[0]
+        # whisper_model = WhisperModel(home_dir + "/model_data/faster-whisper-large-v3")
+        whisper_model = WhisperModel(home_dir + "/model_data/faster-distil-whisper-large-v3",
+            device="cuda",
+            compute_type="float16",
             )
-            print("✅ Whisper model warm-up complete")
-        except Exception as e:
-            print(f"⚠️ Whisper model warm-up failed: {e}")
-        # openwakeword_model = Model(wakeword_models=["./zh/xiaobai.tflite"])
-        # openwakeword_model.predict(np.zeros(FRAME_LENGTH, dtype=np.float32))
+        # whisper_device = getattr(whisper_model, "device", None)
+        # if whisper_device is None:
+        #     inner_model = getattr(whisper_model, "model", None)
+        #     whisper_device = getattr(inner_model, "device", None)
+        # if whisper_device is None:
+        #     whisper_device = "unknown (no device attribute)"
+        # print("Whisper device:", whisper_device)
+        # print("🔥 Warming up Whisper (10s zeros on GPU)...")
+        # warmup_audio = np.zeros(int( TARGET_SR), dtype=np.float32)
+        # warmup_segments, _ = whisper_model.transcribe(
+        #     warmup_audio,
+        #     language="zh",
+        #     task="transcribe",
+        #     beam_size=3,
+        # )
+        # for _ in warmup_segments:
+        #     pass
+
         print("✅ Finished model loading")
 
         # Publishers
         self.publisher_ = self.create_publisher(String, "user_speech", 10)
         self.response_pub = self.create_publisher(String, "llm_response", 10)
+        self.language_pub = self.create_publisher(Bool, "language", 10)
+        # Publish default language (False = Chinese) on startup
+        lang_msg = Bool()
+        lang_msg.data = self.is_english
+        self.language_pub.publish(lang_msg)
 
         # Service client
         # self.cli = self.create_client(String, "llm_service")  # keep placeholder
@@ -316,8 +312,21 @@ class SpeechNode(Node):
                 self.q.queue.clear()
             self.detector.audio_buffer = []
             self.get_logger().info(f"🔇 Speaker playing → mic input disabled, flushed {dropped} chunks")
-        
-        return
+        # else:
+        #     self.get_logger().info("🎤 Speaker stopped → mic input re-enabled")
+
+    def language_cmd_cb(self, msg: Bool):
+        """Callback for /language_cmd Bool topic. False=Chinese, True=English"""
+        self.is_english = msg.data
+        self.detector.is_english = msg.data
+
+        lang_str = "English" if msg.data else "Chinese"
+        self.get_logger().info(f"🌐 Language changed to: {lang_str}")
+
+        # Publish the new language setting
+        lang_msg = Bool()
+        lang_msg.data = self.is_english
+        self.language_pub.publish(lang_msg)
 
     def audio_cb(self, indata, frames, time_info, status, q: queue.Queue, input_sr):
         """Audio callback that respects speaker_playing state."""
