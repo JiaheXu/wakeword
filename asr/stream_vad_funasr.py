@@ -19,8 +19,8 @@ from opencc import OpenCC
 from pino_msgs.msg import AudioMSG
 # VAD
 from utils.vad import load_vad
-# Whisper
-from faster_whisper import WhisperModel
+# FunASR
+from funasr import AutoModel
 from pathlib import Path
 
 home_dir = str(Path.home())
@@ -119,7 +119,7 @@ class WakeWordVADDetector:
         self,
         wakeword_model,
         vad_model,
-        whisper_model,
+        asr_model,
         publisher,
         response_pub,
         client,
@@ -129,7 +129,7 @@ class WakeWordVADDetector:
     ):
         self.model = wakeword_model
         self.vad_model = vad_model
-        self.whisper_model = whisper_model
+        self.asr_model = asr_model
         self.publisher = publisher       # publishes raw transcript
         self.response_pub = response_pub # publishes LLM responses
         self.client = client             # service client to llm_service
@@ -196,8 +196,8 @@ class WakeWordVADDetector:
         return len(re.findall(r"[\u4e00-\u9fff]", text))
 
     def transcribe(self, samples: np.ndarray):
-        if self.whisper_model is None:
-            print("⚠️ Whisper model not loaded, skipping transcription")
+        if self.asr_model is None:
+            print("⚠️ FunASR model not loaded, skipping transcription")
             return
 
         transcribe_start = time.time()
@@ -206,23 +206,18 @@ class WakeWordVADDetector:
         if samples.dtype == np.int16:
             samples = samples.astype(np.float32) / 32768.0
 
-        current_lang = "zh"
-        print(f"🌐 Transcribing with language: {current_lang}")
+        # print("🌐 Transcribing with FunASR (Fun-ASR-Nano-2512)")
         try:
-            segments, info = self.whisper_model.transcribe(
-                samples.astype(np.float32),
-                language=current_lang,
-                task="transcribe",
-                beam_size=3,
+            res = self.asr_model.generate(
+                input=samples.astype(np.float32),
+                batch_size_s=300,
+                language="zh",
             )
-            detected_lang = current_lang
 
             transcript_text = ""
-            for seg in segments:
-                text = seg.text.strip()
-                if detected_lang.startswith("zh"):
-                    text = self.traditional_to_simplified(text)
-                transcript_text += text
+            if res and len(res) > 0:
+                raw_text = res[0].get("text", "").strip()
+                transcript_text = self.traditional_to_simplified(raw_text)
 
             transcript_len = len(transcript_text)
             if transcript_text:
@@ -241,7 +236,7 @@ class WakeWordVADDetector:
                 )
             else:
                 self.node.get_logger().info(
-                    "Whisper returned empty transcript (len=0); skipping publish and warmup"
+                    "FunASR returned empty transcript (len=0); skipping publish and warmup"
                 )
         except Exception as e:
             if _is_oom_error(e):
@@ -605,28 +600,26 @@ class SpeechNode(Node):
         try:
             vad_model = load_vad(home_dir + "/model_data/silero_vad.onnx")
             vad_model(np.zeros(1536, dtype=np.float32), sr=TARGET_SR)
-            whisper_model = WhisperModel(home_dir + "/model_data/faster-whisper-base", device='cuda')
+            asr_model = AutoModel(
+                # model="paraformer-zh",
+                # model = "FunAudioLLM/Fun-ASR-Nano-2512",  # requires latest funasr (pip install -U funasr)
+                model = "iic/SenseVoiceSmall",
+                # trust_remote_code = True,
+                device="cuda",
+            )
         except Exception as e:
             if _is_oom_error(e):
                 print(f"❌ OOM during model initialization: {e}")
                 os._exit(1)
             raise
-        # whisper_model = WhisperModel(home_dir + "/model_data/faster-distil-whisper-large-v3", device='cuda')
-        # whisper_model = WhisperModel(home_dir + "/model_data/faster-whisper-base", device='cuda')        
-        # Warm-up whisper model to reduce first-utterance latency
+
+        # Warm-up FunASR model to reduce first-utterance latency
         try:
             warmup_audio = np.zeros(TARGET_SR, dtype=np.float32)  # 1s of silence @16k
-            list(
-                whisper_model.transcribe(
-                    warmup_audio,
-                    language="zh",
-                    task="transcribe",
-                    beam_size=1,
-                )[0]
-            )
-            print("✅ Whisper model warm-up complete")
+            asr_model.generate(input=warmup_audio, batch_size_s=300)
+            print("✅ FunASR model warm-up complete")
         except Exception as e:
-            print(f"⚠️ Whisper model warm-up failed: {e}")
+            print(f"⚠️ FunASR model warm-up failed: {e}")
         # openwakeword_model = Model(wakeword_models=["./zh/xiaobai.tflite"])
         # openwakeword_model.predict(np.zeros(FRAME_LENGTH, dtype=np.float32))
         print("✅ Finished model loading")
@@ -645,7 +638,7 @@ class SpeechNode(Node):
         self.detector = WakeWordVADDetector(
             wakeword_model=None,
             vad_model=vad_model,
-            whisper_model=whisper_model,
+            asr_model=asr_model,
             publisher=self.publisher_,
             response_pub=self.response_pub,
             client=None,
@@ -727,7 +720,7 @@ class SpeechNode(Node):
                 self.q.queue.clear()
             self.detector.audio_buffer = []
             self.get_logger().info(f"🔇 Speaker playing → mic input disabled, flushed {dropped} chunks")
-        
+
         return
 
     def audio_cb(self, indata, frames, time_info, status, q: queue.Queue, input_sr):

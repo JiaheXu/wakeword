@@ -14,6 +14,7 @@ import subprocess
 import re
 import json
 import shutil
+import io
 from collections import deque
 from opencc import OpenCC
 from pino_msgs.msg import AudioMSG
@@ -59,6 +60,58 @@ DEFAULT_ONLINE_WARMUP = [
 
 class NoUsableInputDeviceError(RuntimeError):
     pass
+
+
+class _TranscriptionSegment:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class OnlineWhisperModel:
+    def __init__(
+        self,
+        model_name: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_sec: float = 30.0,
+    ):
+        try:
+            from openai import OpenAI
+        except Exception as exc:
+            raise RuntimeError(
+                "Online Whisper backend requires `openai`. Install with: pip install -U openai"
+            ) from exc
+
+        self.model_name = model_name
+        resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not resolved_api_key:
+            raise RuntimeError("WHISPER_BACKEND=online requires OPENAI_API_KEY.")
+        self.client = OpenAI(
+            api_key=resolved_api_key,
+            base_url=base_url or os.getenv("OPENAI_BASE_URL") or None,
+            timeout=timeout_sec,
+        )
+
+    def transcribe(self, audio: np.ndarray, language="zh", **kwargs):
+        samples = np.asarray(audio)
+        if samples.dtype != np.float32:
+            samples = samples.astype(np.float32)
+        samples = np.clip(samples, -1.0, 1.0)
+
+        wav_buf = io.BytesIO()
+        sf.write(wav_buf, samples, TARGET_SR, format="WAV", subtype="PCM_16")
+        wav_buf.seek(0)
+        wav_buf.name = "audio.wav"
+
+        resp = self.client.audio.transcriptions.create(
+            model=self.model_name,
+            file=wav_buf,
+            language=language,
+        )
+        text = (getattr(resp, "text", "") or "").strip()
+        segments = [_TranscriptionSegment(text)] if text else []
+        info = {"language": language, "backend": "online"}
+        return segments, info
 
 
 def _is_oom_error(exc: BaseException) -> bool:
@@ -224,7 +277,6 @@ class WakeWordVADDetector:
                     text = self.traditional_to_simplified(text)
                 transcript_text += text
 
-            transcript_len = len(transcript_text)
             if transcript_text:
                 chinese_char_count = self.count_chinese_characters(transcript_text)
                 if chinese_char_count >= 8:
@@ -236,13 +288,7 @@ class WakeWordVADDetector:
                 msg = String()
                 msg.data = transcript_text
                 self.publisher.publish(msg)
-                print(
-                    f"📢 Published transcript to raw_input (len={transcript_len}): {transcript_text}"
-                )
-            else:
-                self.node.get_logger().info(
-                    "Whisper returned empty transcript (len=0); skipping publish and warmup"
-                )
+                print(f"📢 Published transcript to raw_input: {transcript_text}")
         except Exception as e:
             if _is_oom_error(e):
                 print(f"❌ OOM during transcription: {e}")
@@ -274,11 +320,7 @@ class WakeWordVADDetector:
     def handle_audio(self, samples):
         samples_norm = (samples / 32767).astype(np.float32)
 
-        try:
-            voice_prob = float(self.vad_model(samples_norm, sr=TARGET_SR).flatten()[0])
-        except Exception as e:
-            print(f"[VAD] Fatal error: {e}")
-            sys.exit(1)
+        voice_prob = float(self.vad_model(samples_norm, sr=TARGET_SR).flatten()[0])
         now = time.time()
         if voice_prob >= VAD_THRESHOLD and (now - self.last_vad_log_time) >= 5.0:
             print(f"VAD prob: {voice_prob:.3f}")
@@ -605,7 +647,14 @@ class SpeechNode(Node):
         try:
             vad_model = load_vad(home_dir + "/model_data/silero_vad.onnx")
             vad_model(np.zeros(1536, dtype=np.float32), sr=TARGET_SR)
-            whisper_model = WhisperModel(home_dir + "/model_data/faster-whisper-base", device='cuda')
+            whisper_backend = os.getenv("WHISPER_BACKEND", "local").strip().lower()
+            online_model_name = os.getenv("WHISPER_ONLINE_MODEL", "whisper-1").strip() or "whisper-1"
+            if whisper_backend == "online":
+                whisper_model = OnlineWhisperModel(model_name=online_model_name)
+                self.get_logger().info(f"🌐 Using online Whisper backend: {online_model_name}")
+            else:
+                whisper_model = WhisperModel(home_dir + "/model_data/faster-whisper-base", device='cuda')
+                self.get_logger().info("🖥️ Using local faster-whisper backend")
         except Exception as e:
             if _is_oom_error(e):
                 print(f"❌ OOM during model initialization: {e}")
